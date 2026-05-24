@@ -1,0 +1,82 @@
+services:
+  api1:
+    build: .
+    image: rinha-2026-rust-api:latest
+    container_name: rinha-api1
+    hostname: api1
+    environment:
+      - RINHA_INDEX_PATH=/data/ivf_int16.bin
+      - RINHA_SOCK_PATH=/tmp/sock/api1.sock
+      - RINHA_NPROBE=192
+    volumes:
+      - sock-volume:/tmp/sock
+    deploy:
+      resources:
+        limits:
+          cpus: "0.4"
+          memory: "160M"
+    networks:
+      - rinha
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+
+  api2:
+    image: rinha-2026-rust-api:latest
+    container_name: rinha-api2
+    hostname: api2
+    depends_on:
+      - api1
+    environment:
+      - RINHA_INDEX_PATH=/data/ivf_int16.bin
+      - RINHA_SOCK_PATH=/tmp/sock/api2.sock
+      - RINHA_NPROBE=192
+    volumes:
+      - sock-volume:/tmp/sock
+    deploy:
+      resources:
+        limits:
+          cpus: "0.4"
+          memory: "160M"
+    networks:
+      - rinha
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+
+  lb:
+    image: rinha-2026-rust-api:latest
+    container_name: rinha-lb
+    hostname: lb
+    depends_on:
+      - api1
+      - api2
+    entrypoint: ["/usr/local/bin/lb"]
+    environment:
+      - PORT=9999
+      - FD_UPSTREAMS=/tmp/sock/api1.sock,/tmp/sock/api2.sock
+      - WORKERS=2
+    ports:
+      - "9999:9999"
+    volumes:
+      - sock-volume:/tmp/sock
+    deploy:
+      resources:
+        limits:
+          cpus: "0.2"
+          memory: "30M"
+    networks:
+      - rinha
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+
+volumes:
+  sock-volume:
+
+networks:
+  rinha:
+    driver: bridge
