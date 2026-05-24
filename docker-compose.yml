@@ -4,9 +4,8 @@ services:
     container_name: rinha-api1
     hostname: api1
     environment:
-      - RINHA_INDEX_PATH=/data/ivf_int16.bin
+      - RINHA_INDEX_PATH=/data/specialist.bin
       - RINHA_SOCK_PATH=/tmp/sock/api1.sock
-      - RINHA_NPROBE=192
     volumes:
       - sock-volume:/tmp/sock
     deploy:
@@ -31,9 +30,8 @@ services:
     depends_on:
       - api1
     environment:
-      - RINHA_INDEX_PATH=/data/ivf_int16.bin
+      - RINHA_INDEX_PATH=/data/specialist.bin
       - RINHA_SOCK_PATH=/tmp/sock/api2.sock
-      - RINHA_NPROBE=192
 
   lb:
     image: smookeydev/rinha-2026-rust-api:latest
