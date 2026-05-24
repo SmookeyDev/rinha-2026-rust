@@ -1,0 +1,32 @@
+[package]
+name = "rinha2026"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "rinha2026"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rinha2026"
+path = "src/main.rs"
+
+[[bin]]
+name = "verify"
+path = "src/bin/verify.rs"
+
+[[bin]]
+name = "lb"
+path = "src/bin/lb.rs"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = false
+strip = true
+
+[dependencies]
+libc = "0.2"
