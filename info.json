@@ -1,0 +1,7 @@
+{
+    "participants": ["SmookeyDev"],
+    "social": ["https://github.com/SmookeyDev"],
+    "source-code-repo": "https://github.com/SmookeyDev/rinha-2026-rust",
+    "stack": ["rust", "alpine", "faiss-ivf"],
+    "open_to_work": false
+}
