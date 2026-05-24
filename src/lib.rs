@@ -9,3 +9,4 @@ pub mod json;
 pub mod normalize;
 pub mod response;
 pub mod server;
+pub mod specialist;

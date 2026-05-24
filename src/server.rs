@@ -21,10 +21,10 @@ use libc::{
 };
 
 use crate::http::{parse_request, RequestKind};
-use crate::ivf::IvfIndex;
 use crate::json::parse_payload;
 use crate::normalize::vectorize_int16;
 use crate::response::{response_for, FALLBACK_LEGIT, READY_OK};
+use crate::specialist::SpecialistIndex;
 
 const READ_BUF_SIZE: usize = 8192;
 const MAX_EVENTS: usize = 256;
@@ -79,7 +79,7 @@ impl Drop for Conn {
     }
 }
 
-pub fn run(sock_path: &str, index: Arc<IvfIndex>, _workers: usize) -> io::Result<()> {
+pub fn run(sock_path: &str, index: Arc<SpecialistIndex>, _workers: usize) -> io::Result<()> {
     pin_current_thread_to_first_cpu();
     let _ = std::fs::remove_file(sock_path);
     let listener_fd = bind_uds_listener(sock_path)?;
@@ -233,7 +233,7 @@ fn recv_fd(control_fd: RawFd) -> Option<RawFd> {
 }
 
 fn epoll_main_loop(
-    index: Arc<IvfIndex>,
+    index: Arc<SpecialistIndex>,
     fd_rx: mpsc::Receiver<RawFd>,
     wake_fd: RawFd,
 ) -> io::Result<()> {
@@ -291,7 +291,7 @@ fn handle_client_event(
     ev: &epoll_event,
     epfd: RawFd,
     conns: &mut HashMap<RawFd, Conn>,
-    index: &IvfIndex,
+    index: &SpecialistIndex,
 ) {
     let fd = ev.u64 as RawFd;
     let evs = { let e = ev.events; e } as i32;
@@ -311,7 +311,7 @@ fn handle_client_event(
     }
 }
 
-fn handle_readable(c: &mut Conn, index: &IvfIndex, epfd: RawFd) -> bool {
+fn handle_readable(c: &mut Conn, index: &SpecialistIndex, epfd: RawFd) -> bool {
     loop {
         if c.filled >= c.read_buf.len() {
             return false;

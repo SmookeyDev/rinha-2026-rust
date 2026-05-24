@@ -11,6 +11,43 @@ use std::time::Instant;
 use rinha2026::ivf::IvfIndex;
 use rinha2026::json::parse_payload;
 use rinha2026::normalize::vectorize_int16;
+use rinha2026::specialist::SpecialistIndex;
+
+enum AnyIndex {
+    Ivf(IvfIndex),
+    Specialist(SpecialistIndex),
+}
+
+impl AnyIndex {
+    fn fraud_count(&self, q: &[i16; 14]) -> u8 {
+        match self {
+            AnyIndex::Ivf(i) => i.fraud_count(q),
+            AnyIndex::Specialist(s) => s.fraud_count(q),
+        }
+    }
+}
+
+fn load_any(path: &str, nprobe: u32) -> std::io::Result<AnyIndex> {
+    let mut buf = [0u8; 8];
+    {
+        use std::io::Read;
+        let mut f = std::fs::File::open(path)?;
+        f.read_exact(&mut buf)?;
+    }
+    if &buf == rinha2026::specialist::MAGIC {
+        let idx = SpecialistIndex::load(&PathBuf::from(path))
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{:?}", e)))?;
+        eprintln!("loaded SpecialistIndex: {} partitions, {} nodes",
+                  idx.n_partitions(), idx.n_nodes());
+        Ok(AnyIndex::Specialist(idx))
+    } else {
+        let idx = IvfIndex::load(&PathBuf::from(path), nprobe)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{:?}", e)))?;
+        eprintln!("loaded IvfIndex: {} vectors, {} clusters, nprobe={}",
+                  idx.n_total, idx.n_clusters, nprobe);
+        Ok(AnyIndex::Ivf(idx))
+    }
+}
 
 fn main() -> std::io::Result<()> {
     let args: Vec<String> = env::args().collect();
@@ -23,8 +60,7 @@ fn main() -> std::io::Result<()> {
     let nprobe: u32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(192);
 
     let t0 = Instant::now();
-    let index = IvfIndex::load(&PathBuf::from(bin_path), nprobe)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{:?}", e)))?;
+    let index = load_any(bin_path, nprobe)?;
     eprintln!("index loaded in {} ms", t0.elapsed().as_millis());
 
     let raw = std::fs::read(test_path)?;
