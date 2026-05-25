@@ -50,13 +50,20 @@ impl Conn {
                 libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
             }
             // SO_BUSY_POLL spins on the socket for a few microseconds before
-            // sleeping in epoll, trading a bit of CPU for lower wake latency.
-            let busy: libc::c_int = 50;
-            libc::setsockopt(
-                fd, libc::SOL_SOCKET, libc::SO_BUSY_POLL,
-                &busy as *const _ as *const _,
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            );
+            // sleeping in epoll. Helpful at low RPS, harmful at saturation —
+            // when the CPU is already busy, the spin just burns quota. Off
+            // by default; set RINHA_BUSY_POLL_US=50 to re-enable.
+            let busy: libc::c_int = std::env::var("RINHA_BUSY_POLL_US")
+                .ok()
+                .and_then(|v| v.parse::<libc::c_int>().ok())
+                .unwrap_or(0);
+            if busy > 0 {
+                libc::setsockopt(
+                    fd, libc::SOL_SOCKET, libc::SO_BUSY_POLL,
+                    &busy as *const _ as *const _,
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                );
+            }
             let one: libc::c_int = 1;
             libc::setsockopt(
                 fd, libc::IPPROTO_TCP, libc::TCP_NODELAY,

@@ -458,6 +458,7 @@ impl SpecialistIndex {
             _mm256_storeu_ps, _mm256_cvtepi16_epi32, _mm256_cvtepi32_ps,
             _mm256_sub_ps, _mm256_add_ps, _mm256_fmadd_ps,
             _mm256_castps256_ps128, _mm256_extractf128_ps,
+            _mm256_cmp_ps, _mm256_movemask_ps, _CMP_GE_OQ,
             _mm_min_ps, _mm_min_ss, _mm_movehl_ps, _mm_shuffle_ps, _mm_cvtss_f32,
         };
 
@@ -490,6 +491,33 @@ impl SpecialistIndex {
             let mut acc_a = _mm256_setzero_ps();
             let mut acc_b = _mm256_setzero_ps();
             let mut d = 0;
+
+            // Phase 1: first 10 dims (5 pairs). Then partial-prune check —
+            // if every lane already crossed `worst_f32` after ~71% of the
+            // FMAs, the remaining 4 dims can't bring any lane back below,
+            // so we skip them entirely. Borrowed from dalvorsn's cpp scan.
+            while d < 10 {
+                let r0 = _mm_loadu_si128(panels_ptr.add(p + d * LANES) as *const __m128i);
+                let r1 = _mm_loadu_si128(panels_ptr.add(p + (d + 1) * LANES) as *const __m128i);
+                let f0 = _mm256_cvtepi32_ps(_mm256_cvtepi16_epi32(r0));
+                let f1 = _mm256_cvtepi32_ps(_mm256_cvtepi16_epi32(r1));
+                let diff0 = _mm256_sub_ps(f0, qb[d]);
+                let diff1 = _mm256_sub_ps(f1, qb[d + 1]);
+                acc_a = _mm256_fmadd_ps(diff0, diff0, acc_a);
+                acc_b = _mm256_fmadd_ps(diff1, diff1, acc_b);
+                d += 2;
+            }
+            {
+                let partial = _mm256_add_ps(acc_a, acc_b);
+                let worst_b = _mm256_set1_ps(worst_f32);
+                let mask = _mm256_cmp_ps::<_CMP_GE_OQ>(partial, worst_b);
+                if _mm256_movemask_ps(mask) == 0xFF {
+                    p += DIM * LANES;
+                    continue;
+                }
+            }
+
+            // Phase 2: remaining dims.
             while d + 1 < DIM {
                 let r0 = _mm_loadu_si128(panels_ptr.add(p + d * LANES) as *const __m128i);
                 let r1 = _mm_loadu_si128(panels_ptr.add(p + (d + 1) * LANES) as *const __m128i);
