@@ -190,8 +190,14 @@ impl MmapRegion {
         }
         #[cfg(target_os = "linux")]
         unsafe {
-            libc::madvise(ptr, len, libc::MADV_WILLNEED);
             libc::madvise(ptr, len, libc::MADV_HUGEPAGE);
+            // POPULATE_READ (Linux 5.14+) pre-faults every page synchronously,
+            // so the first request never pays the cold-cache fault. Pairs with
+            // HUGEPAGE so 2MB pages are materialised up-front. Best-effort:
+            // older kernels return EINVAL, which is fine — warm() still
+            // touches every page below.
+            libc::madvise(ptr, len, libc::MADV_POPULATE_READ);
+            libc::madvise(ptr, len, libc::MADV_WILLNEED);
         }
         Ok(MmapRegion { ptr: ptr as *mut u8, len })
     }
