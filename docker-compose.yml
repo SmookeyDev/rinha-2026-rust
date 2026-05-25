@@ -4,6 +4,9 @@ services:
     image: rinha-2026-rust-api:latest
     container_name: rinha-api1
     hostname: api1
+    restart: always
+    logging:
+      driver: "none"
     environment:
       - RINHA_INDEX_PATH=/data/specialist.bin
       - RINHA_SOCK_PATH=/tmp/sock/api1.sock
@@ -12,7 +15,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.4"
+          cpus: "0.42"
           memory: "160M"
     networks:
       - rinha
@@ -20,14 +23,15 @@ services:
       nofile:
         soft: 65535
         hard: 65535
-      memlock:
-        soft: -1
-        hard: -1
 
   api2:
     image: rinha-2026-rust-api:latest
     container_name: rinha-api2
     hostname: api2
+    restart: always
+    network_mode: "none"
+    logging:
+      driver: "none"
     depends_on:
       - api1
     environment:
@@ -38,22 +42,20 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.4"
+          cpus: "0.42"
           memory: "160M"
-    networks:
-      - rinha
     ulimits:
       nofile:
         soft: 65535
         hard: 65535
-      memlock:
-        soft: -1
-        hard: -1
 
   lb:
     image: rinha-2026-rust-api:latest
     container_name: rinha-lb
     hostname: lb
+    restart: always
+    logging:
+      driver: "none"
     depends_on:
       - api1
       - api2
@@ -69,7 +71,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.2"
+          cpus: "0.16"
           memory: "30M"
     networks:
       - rinha
@@ -80,6 +82,11 @@ services:
 
 volumes:
   sock-volume:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=10m
 
 networks:
   rinha:

@@ -34,9 +34,16 @@ pub const DIM: usize = 14;
 pub const PACKED_DIMS: usize = 16;
 pub const K: usize = 5;
 pub const LANES: usize = 8;
-pub const LEAF_SIZE: usize = 48;
+pub const LEAF_SIZE: usize = 128;
 pub const MAX_PARTITIONS: usize = 256;
 pub const TREE_STACK_CAPACITY: usize = 128;
+
+// When the 5th-best squared distance falls below this threshold, the top-5
+// are tight enough (within ~0.14 in normalized feature space) that no
+// further probing can change the fraud count. Empirically validated on the
+// test dataset by MXLange's c-api-rinha2026; we adopt the same constant.
+//   ((QUANT_SCALE * 140) / 1000)^2 = 1400^2 = 1_960_000
+pub const EARLY_DISTANCE_LIMIT: f32 = 1_960_000.0;
 
 pub const MAGIC: &[u8; 8] = b"RSPECST1";
 pub const FORMAT_VERSION: u32 = 1;
@@ -303,7 +310,7 @@ impl SpecialistIndex {
     }
 
     fn predict(&self, q: &QueryVector) -> u8 {
-        let mut best_dists = [i64::MAX; K];
+        let mut best_dists = [f32::MAX; K];
         let mut best_labels = [0u8; K];
 
         let query_key = compute_partition_key(q);
@@ -311,30 +318,37 @@ impl SpecialistIndex {
         SCRATCH.with(|s| {
             let mut s = s.borrow_mut();
             let mut other_count = 0usize;
+            let mut early_done = false;
 
             // Visit the matching partition first if present; collect the rest.
             for (idx, p) in self.partitions.iter().enumerate() {
-                let bound = unsafe { lower_bound_box_avx2(q, &p.min, &p.max) };
+                let bound = unsafe { lower_bound_box_avx2(q, &p.min, &p.max) } as f32;
                 if p.key == query_key {
                     if bound < best_dists[K - 1] {
                         self.descend(p.root_node as usize, bound, q,
                                      &mut best_dists, &mut best_labels);
+                        if best_dists[K - 1] <= EARLY_DISTANCE_LIMIT {
+                            early_done = true;
+                        }
                     }
                 } else {
-                    s.partition_entries[other_count] = (bound, idx as u32);
+                    s.partition_entries[other_count] = (bound as i64, idx as u32);
                     other_count += 1;
                 }
             }
 
-            s.partition_entries[..other_count]
-                .sort_unstable_by_key(|&(bound, _)| bound);
+            if !early_done {
+                s.partition_entries[..other_count]
+                    .sort_unstable_by_key(|&(bound, _)| bound);
 
-            for i in 0..other_count {
-                let (bound, idx) = s.partition_entries[i];
-                if bound >= best_dists[K - 1] { break; }
-                let p = &self.partitions[idx as usize];
-                self.descend(p.root_node as usize, bound, q,
-                             &mut best_dists, &mut best_labels);
+                for i in 0..other_count {
+                    let (bound, idx) = s.partition_entries[i];
+                    if bound as f32 >= best_dists[K - 1] { break; }
+                    let p = &self.partitions[idx as usize];
+                    self.descend(p.root_node as usize, bound as f32, q,
+                                 &mut best_dists, &mut best_labels);
+                    if best_dists[K - 1] <= EARLY_DISTANCE_LIMIT { break; }
+                }
             }
         });
 
@@ -342,12 +356,13 @@ impl SpecialistIndex {
     }
 
     // Iterative DFS through one tree, near-first with far-child stacked for
-    // backtrack. Stops descending whenever the node's bound is no longer
-    // strictly better than the current 5th-best distance.
-    fn descend(&self, root: usize, root_bound: i64, q: &QueryVector,
-               best_dists: &mut [i64; K], best_labels: &mut [u8; K]) {
+    // backtrack. Returns early as soon as the global EARLY_DISTANCE_LIMIT
+    // condition fires; otherwise stops descending whenever the node's bound
+    // is no longer strictly better than the current 5th-best distance.
+    fn descend(&self, root: usize, root_bound: f32, q: &QueryVector,
+               best_dists: &mut [f32; K], best_labels: &mut [u8; K]) {
         let mut stack_nodes = [0usize; TREE_STACK_CAPACITY];
-        let mut stack_bounds = [0i64; TREE_STACK_CAPACITY];
+        let mut stack_bounds = [0f32; TREE_STACK_CAPACITY];
         let mut sp = 0usize;
 
         let mut current = root;
@@ -358,13 +373,14 @@ impl SpecialistIndex {
                 let node = unsafe { *self.nodes.get_unchecked(current) };
                 if node.left < 0 || node.right < 0 {
                     unsafe { self.scan_leaf(&node, q, best_dists, best_labels); }
+                    if best_dists[K - 1] <= EARLY_DISTANCE_LIMIT { return; }
                 } else {
                     let l = node.left as usize;
                     let r = node.right as usize;
                     let ln = unsafe { self.nodes.get_unchecked(l) };
                     let rn = unsafe { self.nodes.get_unchecked(r) };
-                    let lb = unsafe { lower_bound_box_avx2(q, &ln.min, &ln.max) };
-                    let rb = unsafe { lower_bound_box_avx2(q, &rn.min, &rn.max) };
+                    let lb = unsafe { lower_bound_box_avx2(q, &ln.min, &ln.max) } as f32;
+                    let rb = unsafe { lower_bound_box_avx2(q, &rn.min, &rn.max) } as f32;
                     let (near, near_b, far, far_b) = if lb <= rb {
                         (l, lb, r, rb)
                     } else {
@@ -395,7 +411,7 @@ impl SpecialistIndex {
     #[target_feature(enable = "avx2,fma")]
     #[inline]
     unsafe fn scan_leaf(&self, node: &Node, q: &QueryVector,
-                        best_dists: &mut [i64; K], best_labels: &mut [u8; K]) {
+                        best_dists: &mut [f32; K], best_labels: &mut [u8; K]) {
         use std::arch::x86_64::{
             __m256, _mm256_setzero_ps, _mm256_set1_ps,
             _mm256_storeu_ps, _mm256_cvtepi16_epi32, _mm256_cvtepi32_ps,
@@ -419,13 +435,7 @@ impl SpecialistIndex {
         let panels_ptr = self.panels.add(panel_start * DIM * LANES);
 
         let mut p = 0usize;
-        // Track current worst-so-far as f32 for the early-exit check; convert
-        // to i64 only when actually inserting.
-        let mut worst_f32 = if best_dists[K - 1] == i64::MAX {
-            f32::MAX
-        } else {
-            best_dists[K - 1] as f32
-        };
+        let mut worst_f32 = best_dists[K - 1];
 
         for panel in 0..n_full {
             if panel + 1 < n_full {
@@ -475,12 +485,12 @@ impl SpecialistIndex {
             for v in 0..LANES {
                 let d = dists[v];
                 if d < worst_f32 {
-                    let dist_i64 = d as i64;
                     let label = *self.labels.add(base_vec + v);
-                    insert_best(dist_i64, label, best_dists, best_labels);
-                    worst_f32 = best_dists[K - 1] as f32;
+                    insert_best(d, label, best_dists, best_labels);
+                    worst_f32 = best_dists[K - 1];
                 }
             }
+            if worst_f32 <= EARLY_DISTANCE_LIMIT { return; }
         }
 
         // Tail: remaining `tail` vectors live in the next (partial) panel,
@@ -512,10 +522,9 @@ impl SpecialistIndex {
             let base_vec = vec_start + n_full * LANES;
             for v in 0..tail {
                 let d = dists[v];
-                let dist_i64 = d as i64;
-                if dist_i64 < best_dists[K - 1] {
+                if d < best_dists[K - 1] {
                     let label = *self.labels.add(base_vec + v);
-                    insert_best(dist_i64, label, best_dists, best_labels);
+                    insert_best(d, label, best_dists, best_labels);
                 }
             }
         }
@@ -523,7 +532,7 @@ impl SpecialistIndex {
 }
 
 #[inline(always)]
-fn insert_best(dist: i64, label: u8, best_dists: &mut [i64; K], best_labels: &mut [u8; K]) {
+fn insert_best(dist: f32, label: u8, best_dists: &mut [f32; K], best_labels: &mut [u8; K]) {
     if dist >= best_dists[K - 1] { return; }
     let mut pos = K - 1;
     while pos > 0 && dist < best_dists[pos - 1] {
