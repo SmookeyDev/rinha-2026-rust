@@ -27,7 +27,9 @@ use crate::response::{response_for, FALLBACK_LEGIT, READY_OK};
 use crate::specialist::SpecialistIndex;
 
 const READ_BUF_SIZE: usize = 8192;
-const MAX_EVENTS: usize = 256;
+// 64 keeps per-iteration cost bounded under spike: large batches stretch
+// the time-to-first-byte of late events in the batch.
+const MAX_EVENTS: usize = 64;
 const LISTEN_BACKLOG: i32 = 4096;
 const WAKE_TOKEN: u64 = u64::MAX;
 
@@ -58,6 +60,14 @@ impl Conn {
             let one: libc::c_int = 1;
             libc::setsockopt(
                 fd, libc::IPPROTO_TCP, libc::TCP_NODELAY,
+                &one as *const _ as *const _,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+            // Force ACK immediately on the next recv/send instead of the
+            // kernel's delayed-ACK heuristic. Kernel resets QUICKACK after
+            // each event, so we re-arm it in flush_write too.
+            libc::setsockopt(
+                fd, libc::IPPROTO_TCP, libc::TCP_QUICKACK,
                 &one as *const _ as *const _,
                 std::mem::size_of::<libc::c_int>() as libc::socklen_t,
             );
@@ -414,6 +424,12 @@ fn flush_write(c: &mut Conn, epfd: RawFd) -> bool {
         c.write_buf.clear();
         c.write_pos = 0;
         unsafe {
+            let one: libc::c_int = 1;
+            libc::setsockopt(
+                c.fd, libc::IPPROTO_TCP, libc::TCP_QUICKACK,
+                &one as *const _ as *const _,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
             let mut ev = epoll_event { events: EPOLLIN as u32, u64: c.fd as u64 };
             epoll_ctl(epfd, EPOLL_CTL_MOD, c.fd, &mut ev);
         }

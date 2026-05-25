@@ -5,6 +5,14 @@ use rinha2026::server;
 use rinha2026::specialist::SpecialistIndex;
 
 fn main() -> std::io::Result<()> {
+    // Disable timer coalescing so epoll wake-ups don't get batched up to
+    // 50us by the kernel. Costs ~1ns per timer arming; reduces tail latency
+    // on the busy-poll path.
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::prctl(libc::PR_SET_TIMERSLACK, 1u64, 0u64, 0u64, 0u64);
+    }
+
     let index_path = std::env::var("RINHA_INDEX_PATH")
         .unwrap_or_else(|_| "/data/specialist.bin".into());
     let sock_path = std::env::var("RINHA_SOCK_PATH")
