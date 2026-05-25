@@ -215,6 +215,11 @@ pub struct SpecialistIndex {
     labels_len: usize,
     strong_decision: bool,
     early_distance_limit: f32,
+    // Cap on total leaf vectors visited per query (count-based early-exit,
+    // borrowed from dalvorsn/daniloitagyba). u32::MAX disables. Bounds the
+    // worst-case scan time on borderline queries that don't trigger the
+    // distance-based early-exit. Tune via RINHA_EARLY_CANDIDATES.
+    early_candidates_limit: u32,
 }
 
 unsafe impl Send for SpecialistIndex {}
@@ -285,6 +290,10 @@ impl SpecialistIndex {
             .ok()
             .and_then(|v| v.parse::<f32>().ok())
             .unwrap_or(EARLY_DISTANCE_LIMIT);
+        let early_candidates_limit = std::env::var("RINHA_EARLY_CANDIDATES")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(u32::MAX);
 
         let idx = SpecialistIndex {
             total_vectors: h.total_vectors,
@@ -298,6 +307,7 @@ impl SpecialistIndex {
             labels_len,
             strong_decision,
             early_distance_limit,
+            early_candidates_limit,
         };
         idx.warm();
         Ok(idx)
@@ -344,20 +354,24 @@ impl SpecialistIndex {
         let query_key = compute_partition_key(q);
         let strong = self.strong_decision;
         let early_limit = self.early_distance_limit;
+        let cand_limit = self.early_candidates_limit;
 
         SCRATCH.with(|s| {
             let mut s = s.borrow_mut();
             let mut other_count = 0usize;
             let mut early_done = false;
+            let mut visited: u32 = 0;
 
             // Visit the matching partition first if present; collect the rest.
             for (idx, p) in self.partitions.iter().enumerate() {
                 let bound = unsafe { lower_bound_box_avx2(q, &p.min, &p.max) } as f32;
                 if p.key == query_key {
                     if bound < best_dists[K - 1] {
-                        self.descend(p.root_node as usize, bound, q,
-                                     &mut best_dists, &mut best_labels);
+                        visited = visited.saturating_add(
+                            self.descend(p.root_node as usize, bound, q,
+                                         &mut best_dists, &mut best_labels));
                         if best_dists[K - 1] <= early_limit
+                            || visited >= cand_limit
                             || (strong
                                 && best_dists[K - 1] <= STRONG_DECISION_LIMIT
                                 && is_unanimous(&best_labels))
@@ -379,9 +393,11 @@ impl SpecialistIndex {
                     let (bound, idx) = s.partition_entries[i];
                     if bound as f32 >= best_dists[K - 1] { break; }
                     let p = &self.partitions[idx as usize];
-                    self.descend(p.root_node as usize, bound as f32, q,
-                                 &mut best_dists, &mut best_labels);
+                    visited = visited.saturating_add(
+                        self.descend(p.root_node as usize, bound as f32, q,
+                                     &mut best_dists, &mut best_labels));
                     if best_dists[K - 1] <= early_limit { break; }
+                    if visited >= cand_limit { break; }
                     if strong
                         && best_dists[K - 1] <= STRONG_DECISION_LIMIT
                         && is_unanimous(&best_labels)
@@ -400,11 +416,12 @@ impl SpecialistIndex {
     // condition fires; otherwise stops descending whenever the node's bound
     // is no longer strictly better than the current 5th-best distance.
     fn descend(&self, root: usize, root_bound: f32, q: &QueryVector,
-               best_dists: &mut [f32; K], best_labels: &mut [u8; K]) {
+               best_dists: &mut [f32; K], best_labels: &mut [u8; K]) -> u32 {
         let mut stack_nodes = [0usize; TREE_STACK_CAPACITY];
         let mut stack_bounds = [0f32; TREE_STACK_CAPACITY];
         let mut sp = 0usize;
         let early_limit = self.early_distance_limit;
+        let mut visited: u32 = 0;
 
         let mut current = root;
         let mut current_bound = root_bound;
@@ -413,8 +430,9 @@ impl SpecialistIndex {
             if current_bound < best_dists[K - 1] {
                 let node = unsafe { *self.nodes.get_unchecked(current) };
                 if node.left < 0 || node.right < 0 {
+                    visited += node.vec_count;
                     unsafe { self.scan_leaf(&node, q, best_dists, best_labels); }
-                    if best_dists[K - 1] <= early_limit { return; }
+                    if best_dists[K - 1] <= early_limit { return visited; }
                 } else {
                     let l = node.left as usize;
                     let r = node.right as usize;
@@ -444,6 +462,7 @@ impl SpecialistIndex {
             current = stack_nodes[sp];
             current_bound = stack_bounds[sp];
         }
+        visited
     }
 
     // Scans a leaf's SoA-8 panels. Distance compute reuses the FMA pattern
