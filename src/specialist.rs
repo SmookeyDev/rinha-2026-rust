@@ -220,6 +220,7 @@ pub struct SpecialistIndex {
     labels: *const u8,
     labels_len: usize,
     strong_decision: bool,
+    early_distance_limit: f32,
 }
 
 unsafe impl Send for SpecialistIndex {}
@@ -286,6 +287,10 @@ impl SpecialistIndex {
         let strong_decision = std::env::var("RINHA_STRONG_DECISION")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
+        let early_distance_limit = std::env::var("RINHA_EARLY_LIMIT")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(EARLY_DISTANCE_LIMIT);
 
         let idx = SpecialistIndex {
             total_vectors: h.total_vectors,
@@ -298,6 +303,7 @@ impl SpecialistIndex {
             labels,
             labels_len,
             strong_decision,
+            early_distance_limit,
         };
         idx.warm();
         Ok(idx)
@@ -343,6 +349,7 @@ impl SpecialistIndex {
 
         let query_key = compute_partition_key(q);
         let strong = self.strong_decision;
+        let early_limit = self.early_distance_limit;
 
         SCRATCH.with(|s| {
             let mut s = s.borrow_mut();
@@ -356,7 +363,7 @@ impl SpecialistIndex {
                     if bound < best_dists[K - 1] {
                         self.descend(p.root_node as usize, bound, q,
                                      &mut best_dists, &mut best_labels);
-                        if best_dists[K - 1] <= EARLY_DISTANCE_LIMIT
+                        if best_dists[K - 1] <= early_limit
                             || (strong
                                 && best_dists[K - 1] <= STRONG_DECISION_LIMIT
                                 && is_unanimous(&best_labels))
@@ -380,7 +387,7 @@ impl SpecialistIndex {
                     let p = &self.partitions[idx as usize];
                     self.descend(p.root_node as usize, bound as f32, q,
                                  &mut best_dists, &mut best_labels);
-                    if best_dists[K - 1] <= EARLY_DISTANCE_LIMIT { break; }
+                    if best_dists[K - 1] <= early_limit { break; }
                     if strong
                         && best_dists[K - 1] <= STRONG_DECISION_LIMIT
                         && is_unanimous(&best_labels)
@@ -403,6 +410,7 @@ impl SpecialistIndex {
         let mut stack_nodes = [0usize; TREE_STACK_CAPACITY];
         let mut stack_bounds = [0f32; TREE_STACK_CAPACITY];
         let mut sp = 0usize;
+        let early_limit = self.early_distance_limit;
 
         let mut current = root;
         let mut current_bound = root_bound;
@@ -412,7 +420,7 @@ impl SpecialistIndex {
                 let node = unsafe { *self.nodes.get_unchecked(current) };
                 if node.left < 0 || node.right < 0 {
                     unsafe { self.scan_leaf(&node, q, best_dists, best_labels); }
-                    if best_dists[K - 1] <= EARLY_DISTANCE_LIMIT { return; }
+                    if best_dists[K - 1] <= early_limit { return; }
                 } else {
                     let l = node.left as usize;
                     let r = node.right as usize;
@@ -472,6 +480,7 @@ impl SpecialistIndex {
             qb[d] = _mm256_set1_ps(q[d] as f32);
         }
         let panels_ptr = self.panels.add(panel_start * DIM * LANES);
+        let early_limit = self.early_distance_limit;
 
         let mut p = 0usize;
         let mut worst_f32 = best_dists[K - 1];
@@ -529,7 +538,7 @@ impl SpecialistIndex {
                     worst_f32 = best_dists[K - 1];
                 }
             }
-            if worst_f32 <= EARLY_DISTANCE_LIMIT { return; }
+            if worst_f32 <= early_limit { return; }
         }
 
         // Tail: remaining `tail` vectors live in the next (partial) panel,
