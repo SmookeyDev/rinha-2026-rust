@@ -1,6 +1,7 @@
 services:
   api1: &api
     image: smookeydev/rinha-2026-rust-api:latest
+    pull_policy: always
     container_name: rinha-api1
     hostname: api1
     environment:
@@ -32,6 +33,7 @@ services:
 
   lb:
     image: smookeydev/rinha-2026-rust-api:latest
+    pull_policy: always
     container_name: rinha-lb
     hostname: lb
     depends_on:
