@@ -5,7 +5,6 @@ services:
     container_name: rinha-api1
     hostname: api1
     restart: always
-    cpuset: "0,1"
     security_opt:
       - seccomp=unconfined
     logging:
@@ -35,7 +34,6 @@ services:
     hostname: api2
     restart: always
     network_mode: "none"
-    cpuset: "2,3"
     security_opt:
       - seccomp=unconfined
     logging:
@@ -64,7 +62,6 @@ services:
     container_name: rinha-lb
     hostname: lb
     restart: always
-    cpuset: "0,2"
     security_opt:
       - seccomp=unconfined
     logging:
