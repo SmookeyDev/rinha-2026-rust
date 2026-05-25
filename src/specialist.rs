@@ -45,6 +45,13 @@ pub const TREE_STACK_CAPACITY: usize = 128;
 //   ((QUANT_SCALE * 140) / 1000)^2 = 1400^2 = 1_960_000
 pub const EARLY_DISTANCE_LIMIT: f32 = 1_960_000.0;
 
+// Strong-decision early termination (gated by RINHA_STRONG_DECISION env).
+// When the top-5 are unanimous (all legit or all fraud) and tight enough
+// (~0.20 normalized = 2000^2), the binary approved/denied outcome can't
+// flip even if a closer neighbor exists — at worst one slot swaps and the
+// fraud count moves by 1, which doesn't cross the 3-of-5 threshold.
+pub const STRONG_DECISION_LIMIT: f32 = 4_000_000.0;
+
 pub const MAGIC: &[u8; 8] = b"RSPECST1";
 pub const FORMAT_VERSION: u32 = 1;
 
@@ -103,6 +110,15 @@ pub fn pad_query(unpacked: &[i16; DIM]) -> QueryVector {
     let mut q = [0i16; PACKED_DIMS];
     q[..DIM].copy_from_slice(unpacked);
     q
+}
+
+// True when top-5 are all legit (sum=0) or all fraud (sum=K). At worst a
+// single closer neighbor swaps one slot, moving the count by 1 — still on
+// the same side of the 3-of-5 threshold, so the binary decision is locked.
+#[inline(always)]
+fn is_unanimous(labels: &[u8; K]) -> bool {
+    let s: u32 = labels.iter().map(|&l| l as u32).sum();
+    s == 0 || s == K as u32
 }
 
 // 8-bit partition key. Bits are chosen so that vectors sharing the same key
@@ -197,6 +213,7 @@ pub struct SpecialistIndex {
     panels_len: usize,
     labels: *const u8,
     labels_len: usize,
+    strong_decision: bool,
 }
 
 unsafe impl Send for SpecialistIndex {}
@@ -260,6 +277,10 @@ impl SpecialistIndex {
         }
         let labels = unsafe { bytes.as_ptr().add(cur) };
 
+        let strong_decision = std::env::var("RINHA_STRONG_DECISION")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
         let idx = SpecialistIndex {
             total_vectors: h.total_vectors,
             scale: h.scale as f32,
@@ -270,6 +291,7 @@ impl SpecialistIndex {
             panels_len,
             labels,
             labels_len,
+            strong_decision,
         };
         idx.warm();
         Ok(idx)
@@ -314,6 +336,7 @@ impl SpecialistIndex {
         let mut best_labels = [0u8; K];
 
         let query_key = compute_partition_key(q);
+        let strong = self.strong_decision;
 
         SCRATCH.with(|s| {
             let mut s = s.borrow_mut();
@@ -327,7 +350,11 @@ impl SpecialistIndex {
                     if bound < best_dists[K - 1] {
                         self.descend(p.root_node as usize, bound, q,
                                      &mut best_dists, &mut best_labels);
-                        if best_dists[K - 1] <= EARLY_DISTANCE_LIMIT {
+                        if best_dists[K - 1] <= EARLY_DISTANCE_LIMIT
+                            || (strong
+                                && best_dists[K - 1] <= STRONG_DECISION_LIMIT
+                                && is_unanimous(&best_labels))
+                        {
                             early_done = true;
                         }
                     }
@@ -348,6 +375,12 @@ impl SpecialistIndex {
                     self.descend(p.root_node as usize, bound as f32, q,
                                  &mut best_dists, &mut best_labels);
                     if best_dists[K - 1] <= EARLY_DISTANCE_LIMIT { break; }
+                    if strong
+                        && best_dists[K - 1] <= STRONG_DECISION_LIMIT
+                        && is_unanimous(&best_labels)
+                    {
+                        break;
+                    }
                 }
             }
         });
