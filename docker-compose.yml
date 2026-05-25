@@ -13,6 +13,7 @@ services:
       - RINHA_INDEX_PATH=/data/specialist.bin
       - RINHA_SOCK_PATH=/tmp/sock/api1.sock
       - RINHA_EARLY_LIMIT=2500000
+      - RINHA_EARLY_CANDIDATES=15000
     volumes:
       - sock-volume:/tmp/sock
     deploy:
@@ -44,6 +45,7 @@ services:
       - RINHA_INDEX_PATH=/data/specialist.bin
       - RINHA_SOCK_PATH=/tmp/sock/api2.sock
       - RINHA_EARLY_LIMIT=2500000
+      - RINHA_EARLY_CANDIDATES=15000
     volumes:
       - sock-volume:/tmp/sock
     deploy:
