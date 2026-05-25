@@ -1,9 +1,12 @@
 services:
-  api1: &api
+  api1:
     image: smookeydev/rinha-2026-rust-api:latest
     pull_policy: always
     container_name: rinha-api1
     hostname: api1
+    restart: always
+    logging:
+      driver: "none"
     environment:
       - RINHA_INDEX_PATH=/data/specialist.bin
       - RINHA_SOCK_PATH=/tmp/sock/api1.sock
@@ -12,7 +15,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.4"
+          cpus: "0.42"
           memory: "160M"
     networks:
       - rinha
@@ -22,20 +25,39 @@ services:
         hard: 65535
 
   api2:
-    <<: *api
+    image: smookeydev/rinha-2026-rust-api:latest
+    pull_policy: always
     container_name: rinha-api2
     hostname: api2
+    restart: always
+    network_mode: "none"
+    logging:
+      driver: "none"
     depends_on:
       - api1
     environment:
       - RINHA_INDEX_PATH=/data/specialist.bin
       - RINHA_SOCK_PATH=/tmp/sock/api2.sock
+    volumes:
+      - sock-volume:/tmp/sock
+    deploy:
+      resources:
+        limits:
+          cpus: "0.42"
+          memory: "160M"
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
 
   lb:
     image: smookeydev/rinha-2026-rust-api:latest
     pull_policy: always
     container_name: rinha-lb
     hostname: lb
+    restart: always
+    logging:
+      driver: "none"
     depends_on:
       - api1
       - api2
@@ -51,7 +73,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.2"
+          cpus: "0.16"
           memory: "30M"
     networks:
       - rinha
@@ -62,6 +84,11 @@ services:
 
 volumes:
   sock-volume:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=10m
 
 networks:
   rinha:
