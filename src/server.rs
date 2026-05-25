@@ -90,7 +90,9 @@ impl Drop for Conn {
 }
 
 pub fn run(sock_path: &str, index: Arc<SpecialistIndex>, _workers: usize) -> io::Result<()> {
-    pin_current_thread_to_first_cpu();
+    // Don't pin: without cpuset every API container would land on cpu 0,
+    // and contention with the LB on the same core dwarfs any cache locality
+    // gain. Let the kernel scheduler distribute across the 4 cpus available.
     let _ = std::fs::remove_file(sock_path);
     let listener_fd = bind_uds_listener(sock_path)?;
     eprintln!("listening on {}", sock_path);
