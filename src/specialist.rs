@@ -154,13 +154,13 @@ impl MmapRegion {
                 "empty index file",
             ));
         }
-        let mut flags = libc::MAP_PRIVATE;
-        #[cfg(target_os = "linux")]
-        {
-            flags |= libc::MAP_POPULATE;
-        }
+        // MAP_PRIVATE only (no MAP_POPULATE). Pre-faulting 100 MB in one
+        // burst risks tripping the cgroup memory.max on tight limits; we
+        // demand-fault then explicitly touch every page in `warm()` so the
+        // memory pressure ramps up smoothly.
         let ptr = unsafe {
-            libc::mmap(ptr::null_mut(), len, libc::PROT_READ, flags, file.as_raw_fd(), 0)
+            libc::mmap(ptr::null_mut(), len, libc::PROT_READ,
+                       libc::MAP_PRIVATE, file.as_raw_fd(), 0)
         };
         if ptr == libc::MAP_FAILED {
             return Err(std::io::Error::last_os_error());
@@ -269,11 +269,27 @@ impl SpecialistIndex {
     }
 
     fn warm(&self) {
+        // Touch one byte per 4 KB page to fault the file into the page cache
+        // smoothly — avoids the burst that MAP_POPULATE causes under tight
+        // cgroup memory limits.
+        let mut sum: u32 = 0;
+        let stride = 4096 / size_of::<i16>();
         unsafe {
+            let panels = slice::from_raw_parts(self.panels, self.panels_len);
+            for v in panels.iter().step_by(stride) {
+                sum = sum.wrapping_add(*v as u32);
+            }
+            let labels = slice::from_raw_parts(self.labels, self.labels_len);
+            for l in labels.iter().step_by(4096) {
+                sum = sum.wrapping_add(*l as u32);
+            }
+            // Best-effort mlock; silent EPERM when the container lacks
+            // CAP_IPC_LOCK or RLIMIT_MEMLOCK is low.
             libc::mlock(self.panels as *const libc::c_void,
                         self.panels_len * size_of::<i16>());
             libc::mlock(self.labels as *const libc::c_void, self.labels_len);
         }
+        std::hint::black_box(sum);
     }
 
     pub fn n_partitions(&self) -> usize { self.partitions.len() }
