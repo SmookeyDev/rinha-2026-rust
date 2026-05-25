@@ -5,11 +5,15 @@ services:
     container_name: rinha-api1
     hostname: api1
     restart: always
+    cpuset: "0,1"
+    security_opt:
+      - seccomp=unconfined
     logging:
       driver: "none"
     environment:
       - RINHA_INDEX_PATH=/data/specialist.bin
       - RINHA_SOCK_PATH=/tmp/sock/api1.sock
+      - RINHA_STRONG_DECISION=1
     volumes:
       - sock-volume:/tmp/sock
     deploy:
@@ -31,6 +35,9 @@ services:
     hostname: api2
     restart: always
     network_mode: "none"
+    cpuset: "2,3"
+    security_opt:
+      - seccomp=unconfined
     logging:
       driver: "none"
     depends_on:
@@ -38,6 +45,7 @@ services:
     environment:
       - RINHA_INDEX_PATH=/data/specialist.bin
       - RINHA_SOCK_PATH=/tmp/sock/api2.sock
+      - RINHA_STRONG_DECISION=1
     volumes:
       - sock-volume:/tmp/sock
     deploy:
@@ -56,6 +64,9 @@ services:
     container_name: rinha-lb
     hostname: lb
     restart: always
+    cpuset: "0,2"
+    security_opt:
+      - seccomp=unconfined
     logging:
       driver: "none"
     depends_on:
