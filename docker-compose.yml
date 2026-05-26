@@ -13,6 +13,8 @@ services:
       - RINHA_INDEX_PATH=/data/specialist.bin
       - RINHA_SOCK_PATH=/tmp/sock/api1.sock
       - RINHA_EARLY_LIMIT=2500000
+      - RINHA_EPOLL_BUSY_POLL_US=50
+      - RINHA_EPOLL_PREFER_BUSY=1
     volumes:
       - sock-volume:/tmp/sock
     deploy:
@@ -44,6 +46,8 @@ services:
       - RINHA_INDEX_PATH=/data/specialist.bin
       - RINHA_SOCK_PATH=/tmp/sock/api2.sock
       - RINHA_EARLY_LIMIT=2500000
+      - RINHA_EPOLL_BUSY_POLL_US=50
+      - RINHA_EPOLL_PREFER_BUSY=1
     volumes:
       - sock-volume:/tmp/sock
     deploy:
