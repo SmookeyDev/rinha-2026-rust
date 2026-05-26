@@ -33,23 +33,6 @@ const MAX_EVENTS: usize = 64;
 const LISTEN_BACKLOG: i32 = 4096;
 const WAKE_TOKEN: u64 = u64::MAX;
 
-// epoll-integrated busy polling (Linux 6.9+, EPIOCSPARAMS ioctl). Unlike the
-// per-socket SO_BUSY_POLL option, this makes epoll_wait itself spin-poll the
-// sockets' NAPI queues for up to `busy_poll_usecs` before sleeping, shaving
-// the wake-up latency off the tail. This is what dalvorsn (top-1 legit) uses.
-// Value is _IOW(0x8A, 0x01, sizeof(EpollParams)=8) per the kernel header
-// (EPOLL_IOC_TYPE = 0x8A); dalvorsn's source hardcodes 'p' which is only a
-// fallback that misfires on old headers — we use the correct magic directly.
-const EPIOCSPARAMS: libc::c_ulong = 0x4008_8a01;
-
-#[repr(C)]
-struct EpollParams {
-    busy_poll_usecs: u32,
-    busy_poll_budget: u16,
-    prefer_busy_poll: u8,
-    __pad: u8,
-}
-
 struct Conn {
     fd: RawFd,
     read_buf: Vec<u8>,
@@ -281,20 +264,10 @@ fn epoll_main_loop(
         let mut ev = epoll_event { events: EPOLLIN as u32, u64: WAKE_TOKEN };
         epoll_ctl(epfd, EPOLL_CTL_ADD, wake_fd, &mut ev);
     }
-    apply_epoll_busy_poll(epfd);
-    // Sleep duration once busy polling (if any) expires. -1 blocks forever;
-    // dalvorsn pairs busy poll with a 1ms timeout. Tune via RINHA_EPOLL_TIMEOUT_MS.
-    let epoll_timeout: i32 = std::env::var("RINHA_EPOLL_TIMEOUT_MS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(-1);
     let mut conns: HashMap<RawFd, Conn> = HashMap::with_capacity(2048);
     let mut events: Vec<epoll_event> = vec![epoll_event { events: 0, u64: 0 }; MAX_EVENTS];
     loop {
-        let n = unsafe { epoll_wait(epfd, events.as_mut_ptr(), MAX_EVENTS as i32, epoll_timeout) };
-        if n == 0 {
-            continue;
-        }
+        let n = unsafe { epoll_wait(epfd, events.as_mut_ptr(), MAX_EVENTS as i32, -1) };
         if n < 0 {
             let err = io::Error::last_os_error();
             if err.raw_os_error() == Some(libc::EINTR) {
@@ -319,34 +292,6 @@ fn epoll_main_loop(
     }
     unsafe { libc::close(epfd); }
     Ok(())
-}
-
-// Arm epoll busy polling from env. No-op unless RINHA_EPOLL_BUSY_POLL_US > 0
-// or RINHA_EPOLL_PREFER_BUSY = 1, so the default build behaves exactly as
-// before. Failure (e.g. kernel < 6.9) is logged and ignored — epoll_wait
-// keeps working without it.
-fn apply_epoll_busy_poll(epfd: RawFd) {
-    let usecs: u32 = std::env::var("RINHA_EPOLL_BUSY_POLL_US")
-        .ok().and_then(|v| v.parse().ok()).unwrap_or(0);
-    let budget: u16 = std::env::var("RINHA_EPOLL_BUSY_BUDGET")
-        .ok().and_then(|v| v.parse().ok()).unwrap_or(8);
-    let prefer: u8 = std::env::var("RINHA_EPOLL_PREFER_BUSY")
-        .ok().and_then(|v| v.parse().ok()).unwrap_or(0);
-    if usecs == 0 && prefer == 0 {
-        return;
-    }
-    let params = EpollParams {
-        busy_poll_usecs: usecs,
-        busy_poll_budget: budget,
-        prefer_busy_poll: prefer,
-        __pad: 0,
-    };
-    let rc = unsafe { libc::ioctl(epfd, EPIOCSPARAMS, &params as *const EpollParams) };
-    if rc < 0 {
-        eprintln!("EPIOCSPARAMS failed: {}", io::Error::last_os_error());
-    } else {
-        eprintln!("epoll busy_poll={}us budget={} prefer={}", usecs, budget, prefer);
-    }
 }
 
 fn register_client(epfd: RawFd, client_fd: RawFd, conns: &mut HashMap<RawFd, Conn>) {
