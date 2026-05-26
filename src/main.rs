@@ -11,6 +11,12 @@ fn main() -> std::io::Result<()> {
     #[cfg(target_os = "linux")]
     unsafe {
         libc::prctl(libc::PR_SET_TIMERSLACK, 1u64, 0u64, 0u64, 0u64);
+        // Best-effort mlockall on currently-mapped pages: keeps everything
+        // resident under memory pressure, eliminating minor faults during
+        // the hot path. Returns EPERM silently if the container lacks
+        // CAP_IPC_LOCK or RLIMIT_MEMLOCK is too low — that's fine, we
+        // still mlock the index panels/labels explicitly in specialist.rs.
+        libc::mlockall(libc::MCL_CURRENT);
     }
 
     let index_path = std::env::var("RINHA_INDEX_PATH")
