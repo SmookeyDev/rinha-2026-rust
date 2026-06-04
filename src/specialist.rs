@@ -41,7 +41,11 @@ pub const LANES: usize = 8;
 // into one i32 lane, so _mm256_madd_epi16(diff, diff) sums their squares
 // directly. DIM=14 → 7 pairs.
 pub const PAIRS: usize = (DIM + 1) / 2;
-pub const LEAF_SIZE: usize = 128;
+// LEAF_SIZE=80 (lucasmontano). Smaller leaves → deeper tree → more bbox
+// prunes per query path. Combined with the i16 madd kernel (~5x faster
+// per-block scan) this rebalances the work toward more tree decisions and
+// less per-leaf scanning. Verified to maintain 100% on test-data.
+pub const LEAF_SIZE: usize = 80;
 pub const MAX_PARTITIONS: usize = 256;
 pub const TREE_STACK_CAPACITY: usize = 128;
 
