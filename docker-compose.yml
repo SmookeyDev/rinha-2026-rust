@@ -5,8 +5,6 @@ services:
     container_name: rinha-api1
     hostname: api1
     restart: always
-    security_opt:
-      - seccomp=unconfined
     logging:
       driver: "none"
     environment:
@@ -34,8 +32,6 @@ services:
     hostname: api2
     restart: always
     network_mode: "none"
-    security_opt:
-      - seccomp=unconfined
     logging:
       driver: "none"
     depends_on:
@@ -62,8 +58,6 @@ services:
     container_name: rinha-lb
     hostname: lb
     restart: always
-    security_opt:
-      - seccomp=unconfined
     logging:
       driver: "none"
     depends_on:
