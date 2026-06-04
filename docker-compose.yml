@@ -16,7 +16,6 @@ services:
       - RINHA_WARMUP_QUERIES=2048
     volumes:
       - sock-volume:/tmp/sock
-    cpuset: "0"
     deploy:
       resources:
         limits:
@@ -49,7 +48,6 @@ services:
       - RINHA_WARMUP_QUERIES=2048
     volumes:
       - sock-volume:/tmp/sock
-    cpuset: "2"
     deploy:
       resources:
         limits:
@@ -80,7 +78,6 @@ services:
       - "9999:9999"
     volumes:
       - sock-volume:/tmp/sock
-    cpuset: "1,3"
     deploy:
       resources:
         limits:
