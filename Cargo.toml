@@ -32,6 +32,8 @@ codegen-units = 1
 panic = "abort"
 debug = false
 strip = true
+overflow-checks = false
+incremental = false
 
 [features]
 # build-index pulls in flate2 + serde_json only for the offline preprocess

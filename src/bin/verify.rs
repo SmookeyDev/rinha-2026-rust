@@ -8,12 +8,14 @@ use std::env;
 use std::path::PathBuf;
 use std::time::Instant;
 
+#[cfg(feature = "build-index")]
 use rinha2026::ivf::IvfIndex;
 use rinha2026::json::parse_payload;
 use rinha2026::normalize::vectorize_int16;
 use rinha2026::specialist::SpecialistIndex;
 
 enum AnyIndex {
+    #[cfg(feature = "build-index")]
     Ivf(IvfIndex),
     Specialist(SpecialistIndex),
 }
@@ -21,13 +23,14 @@ enum AnyIndex {
 impl AnyIndex {
     fn fraud_count(&self, q: &[i16; 14]) -> u8 {
         match self {
+            #[cfg(feature = "build-index")]
             AnyIndex::Ivf(i) => i.fraud_count(q),
             AnyIndex::Specialist(s) => s.fraud_count(q),
         }
     }
 }
 
-fn load_any(path: &str, nprobe: u32) -> std::io::Result<AnyIndex> {
+fn load_any(path: &str, _nprobe: u32) -> std::io::Result<AnyIndex> {
     let mut buf = [0u8; 8];
     {
         use std::io::Read;
@@ -41,11 +44,17 @@ fn load_any(path: &str, nprobe: u32) -> std::io::Result<AnyIndex> {
                   idx.n_partitions(), idx.n_nodes());
         Ok(AnyIndex::Specialist(idx))
     } else {
-        let idx = IvfIndex::load(&PathBuf::from(path), nprobe)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{:?}", e)))?;
-        eprintln!("loaded IvfIndex: {} vectors, {} clusters, nprobe={}",
-                  idx.n_total, idx.n_clusters, nprobe);
-        Ok(AnyIndex::Ivf(idx))
+        #[cfg(feature = "build-index")]
+        {
+            let idx = IvfIndex::load(&PathBuf::from(path), _nprobe)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{:?}", e)))?;
+            eprintln!("loaded IvfIndex: {} vectors, {} clusters, nprobe={}",
+                      idx.n_total, idx.n_clusters, _nprobe);
+            return Ok(AnyIndex::Ivf(idx));
+        }
+        #[cfg(not(feature = "build-index"))]
+        Err(std::io::Error::new(std::io::ErrorKind::InvalidData,
+            "non-Specialist index file; rebuild verify with --features build-index"))
     }
 }
 

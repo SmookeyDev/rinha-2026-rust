@@ -68,6 +68,14 @@ fn create_tcp_listener(port: u16) -> std::io::Result<libc::c_int> {
                          &one as *const _ as *const _, std::mem::size_of::<libc::c_int>() as _);
         libc::setsockopt(sock, libc::SOL_SOCKET, libc::SO_REUSEPORT,
                          &one as *const _ as *const _, std::mem::size_of::<libc::c_int>() as _);
+        // TCP_DEFER_ACCEPT: the listener becomes readable only when the
+        // first data byte arrives, not on bare SYN+ACK. Saves the empty
+        // accept→recv (EAGAIN) wake cycle every k6 connection — k6 sends
+        // headers immediately, so the bench triggers data within ~1 RTT.
+        let secs: libc::c_int = 1;
+        libc::setsockopt(sock, libc::IPPROTO_TCP, libc::TCP_DEFER_ACCEPT,
+                         &secs as *const _ as *const _,
+                         std::mem::size_of::<libc::c_int>() as _);
     }
     let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
     addr.sin_family = libc::AF_INET as libc::sa_family_t;
@@ -92,7 +100,9 @@ fn create_tcp_listener(port: u16) -> std::io::Result<libc::c_int> {
 #[cfg(target_os = "linux")]
 fn connect_unix(path: &str) -> std::io::Result<libc::c_int> {
     use std::io;
-    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+    // SOCK_SEQPACKET matches the API listener type — preserves message
+    // boundaries so SCM_RIGHTS cmsg attaches reliably 1:1 to each sendmsg.
+    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC, 0) };
     if fd < 0 { return Err(io::Error::last_os_error()); }
     let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
     addr.sun_family = libc::AF_UNIX as libc::sa_family_t;

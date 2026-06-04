@@ -4,6 +4,9 @@ use mimalloc::MiMalloc;
 static GLOBAL: MiMalloc = MiMalloc;
 
 pub mod http;
+// Legacy IVF index — only used by preprocess + verify legacy path. Hidden
+// from the runtime binary so PGO training and LTO concentrate on specialist.
+#[cfg(feature = "build-index")]
 pub mod ivf;
 pub mod json;
 pub mod normalize;

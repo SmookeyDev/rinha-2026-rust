@@ -14,6 +14,8 @@ pub const RESPONSES: [&[u8]; 6] = [
 
 pub const READY_OK: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok";
 
+pub const NOT_FOUND: &[u8] = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+
 #[inline(always)]
 pub fn response_for(fraud_count: u8) -> &'static [u8] {
     RESPONSES[fraud_count.min(5) as usize]

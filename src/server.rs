@@ -8,10 +8,10 @@
 //   * epoll: waits on client FDs and the eventfd, parses HTTP, runs the IVF
 //     classifier and writes the response.
 
-use std::collections::HashMap;
 use std::ffi::CString;
 use std::io;
 use std::os::fd::RawFd;
+use std::ptr;
 use std::sync::mpsc;
 use std::sync::Arc;
 
@@ -23,7 +23,7 @@ use libc::{
 use crate::http::{parse_request, RequestKind};
 use crate::json::parse_payload;
 use crate::normalize::vectorize_int16;
-use crate::response::{response_for, FALLBACK_LEGIT, READY_OK};
+use crate::response::{response_for, FALLBACK_LEGIT, NOT_FOUND, READY_OK};
 use crate::specialist::SpecialistIndex;
 
 const READ_BUF_SIZE: usize = 8192;
@@ -32,6 +32,25 @@ const READ_BUF_SIZE: usize = 8192;
 const MAX_EVENTS: usize = 64;
 const LISTEN_BACKLOG: i32 = 4096;
 const WAKE_TOKEN: u64 = u64::MAX;
+// Slot-table cap. Linux RawFd is i32; we index by fd directly. 64K covers
+// any plausible connection count under the cgroup nofile=65535 limit.
+const MAX_FD_SLOTS: usize = 65536;
+
+// EPIOCSPARAMS = _IOW('p', 1, struct epoll_params).
+//   _IOC layout: (dir<<30) | (size<<16) | (type<<8) | nr
+//   dir=_IOC_WRITE=1, size=8, type=0x8A (EPOLL_IOC_TYPE), nr=0x01
+//   = (1<<30) | (8<<16) | (0x8A<<8) | 1 = 0x40088A01
+// Lets epoll_wait kernel-side busy-poll the napi_id-tagged sockets before
+// sleeping. Combined with prefer_busy_poll=1 it engages even with timeout=-1.
+const EPIOCSPARAMS: libc::c_ulong = 0x40088A01;
+
+#[repr(C)]
+struct EpollBusyParams {
+    busy_poll_usecs: u32,
+    busy_poll_budget: u16,
+    prefer_busy_poll: u8,
+    _pad: u8,
+}
 
 struct Conn {
     fd: RawFd,
@@ -48,21 +67,6 @@ impl Conn {
             let flags = libc::fcntl(fd, libc::F_GETFL, 0);
             if flags >= 0 {
                 libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
-            }
-            // SO_BUSY_POLL spins on the socket for a few microseconds before
-            // sleeping in epoll. Helpful at low RPS, harmful at saturation —
-            // when the CPU is already busy, the spin just burns quota. Off
-            // by default; set RINHA_BUSY_POLL_US=50 to re-enable.
-            let busy: libc::c_int = std::env::var("RINHA_BUSY_POLL_US")
-                .ok()
-                .and_then(|v| v.parse::<libc::c_int>().ok())
-                .unwrap_or(0);
-            if busy > 0 {
-                libc::setsockopt(
-                    fd, libc::SOL_SOCKET, libc::SO_BUSY_POLL,
-                    &busy as *const _ as *const _,
-                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-                );
             }
             let one: libc::c_int = 1;
             libc::setsockopt(
@@ -96,6 +100,120 @@ impl Drop for Conn {
     }
 }
 
+// O(1) fd→Conn slot table; replaces the HashMap on the hot path.
+// Sparse vec indexed by RawFd; Box<Conn> keeps the slot pointer-sized.
+struct ConnTable {
+    slots: Vec<Option<Box<Conn>>>,
+}
+
+impl ConnTable {
+    fn new() -> Self {
+        let mut slots = Vec::with_capacity(MAX_FD_SLOTS);
+        for _ in 0..MAX_FD_SLOTS { slots.push(None); }
+        Self { slots }
+    }
+
+    #[inline]
+    fn insert(&mut self, fd: RawFd, conn: Conn) {
+        let i = fd as usize;
+        if i < self.slots.len() {
+            self.slots[i] = Some(Box::new(conn));
+        }
+    }
+
+    #[inline]
+    fn get_mut(&mut self, fd: RawFd) -> Option<&mut Conn> {
+        let i = fd as usize;
+        if i < self.slots.len() {
+            self.slots[i].as_deref_mut()
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    fn take(&mut self, fd: RawFd) -> Option<Box<Conn>> {
+        let i = fd as usize;
+        if i < self.slots.len() {
+            self.slots[i].take()
+        } else {
+            None
+        }
+    }
+}
+
+// Engage kernel-side epoll busy-poll. Linux 6.9+ via EPIOCSPARAMS ioctl on the
+// epoll fd. busy_poll_usecs spins the napi_id-tagged sockets for that long
+// inside epoll_wait before sleeping; prefer_busy_poll=1 lets it engage even
+// when timeout = -1. Silently ignored on older kernels / non-NAPI sockets.
+fn apply_epoll_busy_poll(epfd: RawFd) {
+    let usecs: u32 = std::env::var("RINHA_EPOLL_BUSY_US")
+        .ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let budget: u16 = std::env::var("RINHA_EPOLL_BUSY_BUDGET")
+        .ok().and_then(|v| v.parse().ok()).unwrap_or(8);
+    let prefer: u8 = std::env::var("RINHA_EPOLL_PREFER_BUSY")
+        .ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    if usecs == 0 && prefer == 0 { return; }
+    let params = EpollBusyParams {
+        busy_poll_usecs: usecs,
+        busy_poll_budget: budget,
+        prefer_busy_poll: prefer,
+        _pad: 0,
+    };
+    let rc = unsafe { libc::ioctl(epfd, EPIOCSPARAMS, &params as *const EpollBusyParams) };
+    if rc < 0 {
+        eprintln!("EPIOCSPARAMS failed: {}", io::Error::last_os_error());
+    } else {
+        eprintln!("epoll busy_poll={}us budget={} prefer={}", usecs, budget, prefer);
+    }
+}
+
+// epoll_pwait2 wrapper with us-precision timeout. Falls back to epoll_wait
+// (ms precision) on ENOSYS (kernels < 5.11). `timeout_ns < 0` means block.
+fn epoll_pwait2_us(epfd: RawFd, events: &mut [epoll_event], timeout_ns: i64) -> i32 {
+    let n = events.len() as libc::c_int;
+    if timeout_ns < 0 {
+        // Block. epoll_pwait2 with null timespec == infinite.
+        let rc = unsafe {
+            libc::syscall(
+                libc::SYS_epoll_pwait2,
+                epfd as libc::c_long,
+                events.as_mut_ptr() as libc::c_long,
+                n as libc::c_long,
+                ptr::null::<libc::timespec>() as libc::c_long,
+                ptr::null::<libc::sigset_t>() as libc::c_long,
+                0i64,
+            )
+        };
+        if rc < 0 && unsafe { *libc::__errno_location() } == libc::ENOSYS {
+            return unsafe { epoll_wait(epfd, events.as_mut_ptr(), n, -1) };
+        }
+        rc as i32
+    } else {
+        let ts = libc::timespec {
+            tv_sec: (timeout_ns / 1_000_000_000) as libc::time_t,
+            tv_nsec: (timeout_ns % 1_000_000_000) as libc::c_long,
+        };
+        let rc = unsafe {
+            libc::syscall(
+                libc::SYS_epoll_pwait2,
+                epfd as libc::c_long,
+                events.as_mut_ptr() as libc::c_long,
+                n as libc::c_long,
+                &ts as *const libc::timespec as libc::c_long,
+                ptr::null::<libc::sigset_t>() as libc::c_long,
+                0i64,
+            )
+        };
+        if rc < 0 && unsafe { *libc::__errno_location() } == libc::ENOSYS {
+            // ms-precision fallback (ceil up).
+            let ms = ((timeout_ns + 999_999) / 1_000_000) as libc::c_int;
+            return unsafe { epoll_wait(epfd, events.as_mut_ptr(), n, ms) };
+        }
+        rc as i32
+    }
+}
+
 pub fn run(sock_path: &str, index: Arc<SpecialistIndex>, _workers: usize) -> io::Result<()> {
     // Don't pin: without cpuset every API container would land on cpu 0,
     // and contention with the LB on the same core dwarfs any cache locality
@@ -118,29 +236,11 @@ pub fn run(sock_path: &str, index: Arc<SpecialistIndex>, _workers: usize) -> io:
     epoll_main_loop(index, fd_rx, wake_fd)
 }
 
-// Pin the current thread to the first CPU allowed by the cgroup. Reduces
-// cross-core migrations that flush L1/L2 caches mid-IVF-scan.
-fn pin_current_thread_to_first_cpu() {
-    unsafe {
-        let mut allowed: libc::cpu_set_t = std::mem::zeroed();
-        libc::CPU_ZERO(&mut allowed);
-        if libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut allowed) != 0 {
-            return;
-        }
-        let mut pinned: libc::cpu_set_t = std::mem::zeroed();
-        libc::CPU_ZERO(&mut pinned);
-        for cpu in 0..libc::CPU_SETSIZE as usize {
-            if libc::CPU_ISSET(cpu, &allowed) {
-                libc::CPU_SET(cpu, &mut pinned);
-                break;
-            }
-        }
-        let _ = libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &pinned);
-    }
-}
-
 fn bind_uds_listener(path: &str) -> io::Result<RawFd> {
-    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+    // SOCK_SEQPACKET preserves message boundaries: each LB sendmsg(1 byte iov
+    // + SCM_RIGHTS cmsg) maps to exactly one recvmsg here. STREAM can coalesce
+    // sends, risking FD loss when the kernel merges adjacent cmsg payloads.
+    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC, 0) };
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -264,17 +364,26 @@ fn epoll_main_loop(
         let mut ev = epoll_event { events: EPOLLIN as u32, u64: WAKE_TOKEN };
         epoll_ctl(epfd, EPOLL_CTL_ADD, wake_fd, &mut ev);
     }
-    let mut conns: HashMap<RawFd, Conn> = HashMap::with_capacity(2048);
+    apply_epoll_busy_poll(epfd);
+    // Idle wait granularity. -1 blocks until event (cheapest if no other
+    // work). >=0 gives epoll_pwait2 a ns-precision timeout for finer-grained
+    // wake-ups when paired with EPIOCSPARAMS busy-poll.
+    let idle_ns: i64 = std::env::var("RINHA_EPOLL_IDLE_NS")
+        .ok().and_then(|v| v.parse().ok()).unwrap_or(-1);
+    let mut conns = ConnTable::new();
     let mut events: Vec<epoll_event> = vec![epoll_event { events: 0, u64: 0 }; MAX_EVENTS];
     loop {
-        let n = unsafe { epoll_wait(epfd, events.as_mut_ptr(), MAX_EVENTS as i32, -1) };
+        let n = epoll_pwait2_us(epfd, &mut events, idle_ns);
         if n < 0 {
             let err = io::Error::last_os_error();
             if err.raw_os_error() == Some(libc::EINTR) {
                 continue;
             }
-            eprintln!("epoll_wait error: {}", err);
+            eprintln!("epoll_pwait2 error: {}", err);
             break;
+        }
+        if n == 0 {
+            continue;
         }
         for i in 0..n as usize {
             let ev = events[i];
@@ -294,7 +403,7 @@ fn epoll_main_loop(
     Ok(())
 }
 
-fn register_client(epfd: RawFd, client_fd: RawFd, conns: &mut HashMap<RawFd, Conn>) {
+fn register_client(epfd: RawFd, client_fd: RawFd, conns: &mut ConnTable) {
     let conn = Conn::new(client_fd);
     unsafe {
         let mut e = epoll_event { events: EPOLLIN as u32, u64: client_fd as u64 };
@@ -309,13 +418,13 @@ fn register_client(epfd: RawFd, client_fd: RawFd, conns: &mut HashMap<RawFd, Con
 fn handle_client_event(
     ev: &epoll_event,
     epfd: RawFd,
-    conns: &mut HashMap<RawFd, Conn>,
+    conns: &mut ConnTable,
     index: &SpecialistIndex,
 ) {
     let fd = ev.u64 as RawFd;
     let evs = { let e = ev.events; e } as i32;
     let close_now = {
-        let Some(c) = conns.get_mut(&fd) else { return; };
+        let Some(c) = conns.get_mut(fd) else { return; };
         let mut close = false;
         if evs & EPOLLIN != 0 && !handle_readable(c, index, epfd) {
             close = true;
@@ -369,9 +478,7 @@ fn handle_readable(c: &mut Conn, index: &SpecialistIndex, epfd: RawFd) -> bool {
                 }
             }
             RequestKind::NotFound => {
-                c.write_buf.extend_from_slice(
-                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                );
+                c.write_buf.extend_from_slice(NOT_FOUND);
                 c.want_close = true;
                 start += parsed.consumed;
                 break;
@@ -449,8 +556,8 @@ fn flush_write(c: &mut Conn, epfd: RawFd) -> bool {
     true
 }
 
-fn drop_conn(conns: &mut HashMap<RawFd, Conn>, fd: RawFd, epfd: RawFd) {
-    if conns.remove(&fd).is_some() {
+fn drop_conn(conns: &mut ConnTable, fd: RawFd, epfd: RawFd) {
+    if conns.take(fd).is_some() {
         unsafe {
             let mut ev = epoll_event { events: 0, u64: 0 };
             let _ = epoll_ctl(epfd, EPOLL_CTL_DEL, fd, &mut ev);

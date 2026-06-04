@@ -220,6 +220,10 @@ pub struct SpecialistIndex {
     // worst-case scan time on borderline queries that don't trigger the
     // distance-based early-exit. Tune via RINHA_EARLY_CANDIDATES.
     early_candidates_limit: u32,
+    // 8-bit partition_key -> partition index lookup table. -1 means no
+    // partition for that key. Replaces the linear scan over self.partitions
+    // for matching-key routing — used by every query.
+    part_by_key: [i32; 256],
 }
 
 unsafe impl Send for SpecialistIndex {}
@@ -295,6 +299,12 @@ impl SpecialistIndex {
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(u32::MAX);
 
+        let mut part_by_key = [-1i32; 256];
+        for (i, p) in partitions.iter().enumerate() {
+            let k = (p.key & 0xff) as usize;
+            part_by_key[k] = i as i32;
+        }
+
         let idx = SpecialistIndex {
             total_vectors: h.total_vectors,
             scale: h.scale as f32,
@@ -308,6 +318,7 @@ impl SpecialistIndex {
             strong_decision,
             early_distance_limit,
             early_candidates_limit,
+            part_by_key,
         };
         idx.warm();
         Ok(idx)
@@ -340,6 +351,34 @@ impl SpecialistIndex {
     pub fn n_partitions(&self) -> usize { self.partitions.len() }
     pub fn n_nodes(&self) -> usize { self.nodes.len() }
 
+    // Drive `count` synthetic queries through the full predict path. Warms
+    // i-cache, branch predictors, TLB and pulls every leaf the realistic
+    // payload distribution touches into L2 before /ready opens. ~10-20µs
+    // first-burst p99 reduction in measured top-10 submissions.
+    pub fn warmup_queries(&self, count: usize) {
+        let mut state: u64 = 0xDEADBEEFCAFEBABE;
+        let mut acc: u64 = 0;
+        for i in 0..count {
+            // xorshift64 — cheap, no deps, no allocation.
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let mut q = [0i16; DIM];
+            for d in 0..DIM {
+                // Map to [0, 10000]; sentinel -10000 occasionally on dims 5/6
+                // to exercise the missing-last-tx branch in vectorize.
+                let v = ((state.rotate_left((d * 7) as u32) as u32) % 10001) as i16;
+                q[d] = v;
+            }
+            if i & 3 == 0 {
+                q[5] = -10000;
+                q[6] = -10000;
+            }
+            acc = acc.wrapping_add(self.fraud_count(&q) as u64);
+        }
+        std::hint::black_box(acc);
+    }
+
     // Public entry point. Pads the query to PACKED_DIMS=16 and delegates.
     #[inline]
     pub fn fraud_count(&self, q_unpacked: &[i16; DIM]) -> u8 {
@@ -355,6 +394,10 @@ impl SpecialistIndex {
         let strong = self.strong_decision;
         let early_limit = self.early_distance_limit;
         let cand_limit = self.early_candidates_limit;
+        // O(1) primary-partition lookup via 256-bucket LUT. -1 means no
+        // partition stored that key — fall through to the cross-partition
+        // pass directly.
+        let primary = self.part_by_key[(query_key & 0xff) as usize];
 
         SCRATCH.with(|s| {
             let mut s = s.borrow_mut();
@@ -362,30 +405,35 @@ impl SpecialistIndex {
             let mut early_done = false;
             let mut visited: u32 = 0;
 
-            // Visit the matching partition first if present; collect the rest.
-            for (idx, p) in self.partitions.iter().enumerate() {
+            // Descend the matching partition first (queries cluster strongly
+            // here — burns max_top fast, fueling later bbox pruning).
+            if primary >= 0 {
+                let p = &self.partitions[primary as usize];
                 let bound = unsafe { lower_bound_box_avx2(q, &p.min, &p.max) } as f32;
-                if p.key == query_key {
-                    if bound < best_dists[K - 1] {
-                        visited = visited.saturating_add(
-                            self.descend(p.root_node as usize, bound, q,
-                                         &mut best_dists, &mut best_labels));
-                        if best_dists[K - 1] <= early_limit
-                            || visited >= cand_limit
-                            || (strong
-                                && best_dists[K - 1] <= STRONG_DECISION_LIMIT
-                                && is_unanimous(&best_labels))
-                        {
-                            early_done = true;
-                        }
+                if bound < best_dists[K - 1] {
+                    visited = visited.saturating_add(
+                        self.descend(p.root_node as usize, bound, q,
+                                     &mut best_dists, &mut best_labels));
+                    if best_dists[K - 1] <= early_limit
+                        || visited >= cand_limit
+                        || (strong
+                            && best_dists[K - 1] <= STRONG_DECISION_LIMIT
+                            && is_unanimous(&best_labels))
+                    {
+                        early_done = true;
                     }
-                } else {
-                    s.partition_entries[other_count] = (bound as i64, idx as u32);
-                    other_count += 1;
                 }
             }
 
             if !early_done {
+                // Collect bounds for every non-primary partition.
+                for (idx, p) in self.partitions.iter().enumerate() {
+                    if idx as i32 == primary { continue; }
+                    let bound = unsafe { lower_bound_box_avx2(q, &p.min, &p.max) } as f32;
+                    s.partition_entries[other_count] = (bound as i64, idx as u32);
+                    other_count += 1;
+                }
+
                 s.partition_entries[..other_count]
                     .sort_unstable_by_key(|&(bound, _)| bound);
 
