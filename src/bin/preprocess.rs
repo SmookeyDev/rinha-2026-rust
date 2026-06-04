@@ -19,7 +19,7 @@ use flate2::read::GzDecoder;
 
 use rinha2026::specialist::{
     compute_partition_key, pad_query, DIM, FORMAT_VERSION, Header, LANES, LEAF_SIZE,
-    MAGIC, MAX_PARTITIONS, Node, PACKED_DIMS, Partition, QueryVector,
+    MAGIC, MAX_PARTITIONS, Node, PACKED_DIMS, PAIRS, Partition, QueryVector,
 };
 
 const SCALE: i32 = 10000;
@@ -227,25 +227,40 @@ fn build_subtree(rows: &mut [RefRow], nodes: &mut Vec<Node>,
     my_idx
 }
 
+// Pair-interleaved SoA-8 (RSPECST2 layout). Each panel is PAIRS=7 __m256i,
+// each __m256i holds 8 lanes × (even_dim, odd_dim) as 16 i16. Loading this
+// __m256i and doing _mm256_madd_epi16(diff, diff) sums the two squared dims
+// directly into one i32 lane per vector.
 fn pack_leaf(rows: &[RefRow], panels: &mut Vec<i16>, labels: &mut Vec<u8>) {
     let n = rows.len();
     let n_full = n / LANES;
     let tail = n % LANES;
 
     for panel in 0..n_full {
-        for d in 0..DIM {
+        for p in 0..PAIRS {
+            let d_even = 2 * p;
+            let d_odd = 2 * p + 1;
             for lane in 0..LANES {
-                panels.push(rows[panel * LANES + lane].vec[d]);
+                let row = &rows[panel * LANES + lane];
+                panels.push(row.vec[d_even]);
+                panels.push(if d_odd < DIM { row.vec[d_odd] } else { 0 });
             }
         }
     }
     if tail > 0 {
-        for d in 0..DIM {
+        for p in 0..PAIRS {
+            let d_even = 2 * p;
+            let d_odd = 2 * p + 1;
             for lane in 0..LANES {
                 if lane < tail {
-                    panels.push(rows[n_full * LANES + lane].vec[d]);
+                    let row = &rows[n_full * LANES + lane];
+                    panels.push(row.vec[d_even]);
+                    panels.push(if d_odd < DIM { row.vec[d_odd] } else { 0 });
                 } else {
-                    panels.push(0);
+                    // Pad sentinel: i16::MAX in both slots so this lane's
+                    // squared distance always overflows the worst threshold.
+                    panels.push(i16::MAX);
+                    panels.push(i16::MAX);
                 }
             }
         }
