@@ -31,8 +31,6 @@ services:
     hostname: api2
     restart: always
     network_mode: "none"
-    security_opt:
-      - seccomp=unconfined
     logging:
       driver: "none"
     depends_on:
