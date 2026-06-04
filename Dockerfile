@@ -1,29 +1,15 @@
 FROM rust:1.92-bookworm AS builder
-# rustup-bundled llvm-profdata matches the rustc that emits the .profraw files.
-RUN rustup component add llvm-tools-preview \
-    && ln -s "$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-profdata" /usr/local/bin/llvm-profdata
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY .cargo .cargo
 COPY src src
 COPY specialist.bin /data/specialist.bin
-COPY test-data.json /data/test-data.json
 
-# 1) Instrumented build for PGO training.
-ENV PGO_DIR=/tmp/pgo
-RUN RUSTFLAGS="-C target-cpu=haswell -C profile-generate=${PGO_DIR}" \
-    cargo build --release --bin rinha2026 --bin lb --bin verify
-
-# 2) Training run: 54100 representative queries cover the hot path well.
-RUN /build/target/release/verify /data/specialist.bin /data/test-data.json \
-    && ls -la ${PGO_DIR} | head
-
-# 3) Merge .profraw files into the format rustc consumes.
-RUN llvm-profdata merge -o /tmp/merged.profdata ${PGO_DIR}
-
-# 4) Optimised rebuild guided by the merged profile.
-RUN rm -rf /build/target/release
-RUN RUSTFLAGS="-C target-cpu=haswell -C profile-use=/tmp/merged.profdata" \
+# Single non-PGO build. bmtec (top-1) ships without PGO. Our PGO training
+# was driven by verify, which after tier-1 fast-path bypasses ~80% of the
+# kNN code path, leaving the kNN cold-profiled and possibly de-optimized.
+# Dropping PGO gives equal optimization to both paths.
+RUN RUSTFLAGS="-C target-cpu=haswell" \
     cargo build --release --bin rinha2026 --bin lb
 
 FROM debian:bookworm-slim
