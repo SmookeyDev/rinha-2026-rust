@@ -11,8 +11,8 @@ services:
       - RINHA_INDEX_PATH=/data/specialist.bin
       - RINHA_SOCK_PATH=/tmp/sock/api1.sock
       - RINHA_EARLY_LIMIT=2500000
-      - RINHA_EPOLL_BUSY_US=50
-      - RINHA_EPOLL_PREFER_BUSY=1
+      - RINHA_EPOLL_BUSY_US=0
+      - RINHA_EPOLL_PREFER_BUSY=0
       - RINHA_WARMUP_QUERIES=2048
     volumes:
       - sock-volume:/tmp/sock
@@ -43,8 +43,8 @@ services:
       - RINHA_INDEX_PATH=/data/specialist.bin
       - RINHA_SOCK_PATH=/tmp/sock/api2.sock
       - RINHA_EARLY_LIMIT=2500000
-      - RINHA_EPOLL_BUSY_US=50
-      - RINHA_EPOLL_PREFER_BUSY=1
+      - RINHA_EPOLL_BUSY_US=0
+      - RINHA_EPOLL_PREFER_BUSY=0
       - RINHA_WARMUP_QUERIES=2048
     volumes:
       - sock-volume:/tmp/sock
